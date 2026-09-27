@@ -10,6 +10,10 @@ This repo also publishes GitHub Releases. This file is the repo-root release sur
   `wal_checkpoint(TRUNCATE)`, falling back to `PASSIVE` when another reader
   holds the WAL. External tools must snapshot the live file read-only and
   vacuum the snapshot; vacuuming a hot `lcm.db` tears btree page_count.
+- One shared SQLite writer connection per process per database path
+  (`acquire_lcm_connection` / `release_lcm_connection`). Autocommit so a
+  long-lived reader does not pin a WAL snapshot; last release checkpoints.
+  Read-only URIs and `:memory:` stay unshared.
 
 ## v1.0.0-rc.1 - 2026-09-03
 

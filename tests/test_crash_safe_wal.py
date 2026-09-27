@@ -18,9 +18,11 @@ from pathlib import Path
 import pytest
 
 from hermes_lcm.db_bootstrap import (
+    acquire_lcm_connection,
     checkpoint_wal,
     configure_connection,
     ensure_message_origin_columns,
+    release_lcm_connection,
 )
 from hermes_lcm.store import MessageStore
 from hermes_lcm.dag import SummaryDAG
@@ -190,21 +192,27 @@ class TestGracefulClose:
         underlying close."""
         db = tmp_path / "store.db"
         store = MessageStore(db)
+        conn = store._conn
         # Manually invalidate the connection so close() has nothing to do
         store._conn = None
         store.close()  # should not raise
+        release_lcm_connection(conn)
 
     def test_summary_dag_close_does_not_mask_sqlite_error(self, tmp_path: Path):
         db = tmp_path / "dag.db"
         dag = SummaryDAG(db)
+        conn = dag._conn
         dag._conn = None
         dag.close()  # should not raise
+        release_lcm_connection(conn)
 
     def test_lifecycle_state_close_does_not_mask_sqlite_error(self, tmp_path: Path):
         db = tmp_path / "lifecycle.db"
         lc = LifecycleStateStore(db)
+        conn = lc._conn
         lc._conn = None
         lc.close()  # should not raise
+        release_lcm_connection(conn)
 
 
 # --------------------------------------------------------------------------- #
@@ -292,3 +300,78 @@ class TestConcurrentStartupMigration:
         ]
         conn.close()
         assert columns.count("conversation_id") == 1
+
+
+class TestSharedWriterHub:
+    """One filesystem path -> one writer connection in this process."""
+
+    def test_message_dag_lifecycle_share_one_connection(self, tmp_path: Path):
+        db = tmp_path / "shared.db"
+        store = MessageStore(db)
+        dag = SummaryDAG(db)
+        lifecycle = LifecycleStateStore(db)
+        try:
+            assert store._conn is dag._conn
+            assert dag._conn is lifecycle._conn
+            store.append("sess", {"role": "user", "content": "hello"})
+            lifecycle.bind_session("sess")
+            assert store.get_session_messages("sess")
+        finally:
+            store.close()
+            dag.close()
+            lifecycle.close()
+
+    def test_last_release_closes_connection(self, tmp_path: Path):
+        db = tmp_path / "last-close.db"
+        store = MessageStore(db)
+        dag = SummaryDAG(db)
+        conn = store._conn
+        assert conn is dag._conn
+        store.close()
+        conn.execute("SELECT 1").fetchone()
+        dag.close()
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+
+    def test_second_acquire_same_identity(self, tmp_path: Path):
+        db = tmp_path / "second.db"
+        a = acquire_lcm_connection(db)
+        b = acquire_lcm_connection(db)
+        try:
+            assert a is b
+        finally:
+            release_lcm_connection(a)
+            release_lcm_connection(b)
+
+    def test_memory_databases_are_unshared(self):
+        a = MessageStore(":memory:")
+        b = SummaryDAG(":memory:")
+        try:
+            assert a._conn is not b._conn
+        finally:
+            a.close()
+            b.close()
+
+    def test_read_only_does_not_join_writer_hub(self, tmp_path: Path):
+        db = tmp_path / "ro.db"
+        writer = acquire_lcm_connection(db)
+        configure_connection(writer)
+        writer.execute("CREATE TABLE t(x INTEGER)")
+        writer.commit()
+        reader = acquire_lcm_connection(db, read_only=True)
+        try:
+            assert reader is not writer
+        finally:
+            release_lcm_connection(reader)
+            release_lcm_connection(writer)
+
+    def test_shared_store_close_still_truncates_wal(self, tmp_path: Path):
+        db = tmp_path / "wal-share.db"
+        store = MessageStore(db)
+        dag = SummaryDAG(db)
+        store.append("sess", {"role": "user", "content": "hello"})
+        store.close()
+        dag.close()
+        wal = Path(str(db) + "-wal")
+        wal_size = wal.stat().st_size if wal.exists() else 0
+        assert wal_size < 4096, f"WAL still {wal_size} bytes after last close"

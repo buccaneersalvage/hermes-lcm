@@ -18,15 +18,15 @@ import sqlite3
 import threading
 import time
 from typing import Any, Iterable, Sequence
-from urllib.parse import quote
-
 from .db_bootstrap import (
     ASSERTION_MIGRATION_STEP,
-    checkpoint_wal,
+    acquire_lcm_connection,
     configure_connection,
     ensure_assertion_tables,
+    lcm_connection_lock,
     mark_migration_step_complete,
     refuse_schema_version_too_new,
+    release_lcm_connection,
     run_versioned_migrations,
     verify_assertion_schema,
 )
@@ -220,37 +220,27 @@ class AssertionStore:
         self.db_path = Path(db_path)
         self.read_only = bool(read_only)
         self._write_lock = threading.RLock()
-        self._conn = self._open_connection()
+        self._conn = None  # type: ignore[assignment]
         try:
+            self._conn = self._open_connection()
             self._init_db()
         except Exception:
-            self._conn.close()
+            release_lcm_connection(self._conn)
             self._conn = None  # type: ignore[assignment]
             raise
 
     def _open_connection(self) -> sqlite3.Connection:
         if self.read_only:
-            uri = f"file:{quote(str(self.db_path), safe='/')}?mode=ro"
-            conn = sqlite3.connect(
-                uri,
-                uri=True,
-                timeout=5.0,
-                check_same_thread=False,
-                isolation_level=None,
-            )
+            conn = acquire_lcm_connection(self.db_path, read_only=True)
             conn.execute("PRAGMA query_only=ON")
             conn.execute("PRAGMA busy_timeout=30000")
-        else:
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(
-                str(self.db_path),
-                timeout=5.0,
-                check_same_thread=False,
-                isolation_level=None,
-            )
-            refuse_schema_version_too_new(conn)
-            configure_connection(conn)
-        conn.row_factory = sqlite3.Row
+            self._write_lock = lcm_connection_lock(conn)
+            return conn
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = acquire_lcm_connection(self.db_path)
+        self._write_lock = lcm_connection_lock(conn)
+        refuse_schema_version_too_new(conn)
+        configure_connection(conn)
         return conn
 
     def _init_db(self) -> None:
@@ -291,13 +281,8 @@ class AssertionStore:
             conn = self._conn
             if conn is None:
                 return
-            try:
-                if not self.read_only:
-                    conn.commit()
-                checkpoint_wal(conn)
-            finally:
-                conn.close()
-                self._conn = None  # type: ignore[assignment]
+            release_lcm_connection(conn)
+            self._conn = None  # type: ignore[assignment]
 
     def commit(self) -> None:
         """Flush completed assertion work without splitting an active publish."""

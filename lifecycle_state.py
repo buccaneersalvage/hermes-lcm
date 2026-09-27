@@ -18,7 +18,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from .db_bootstrap import checkpoint_wal, configure_connection, refuse_schema_version_too_new, run_versioned_migrations
+from .db_bootstrap import (
+    acquire_lcm_connection,
+    configure_connection,
+    lcm_connection_lock,
+    refuse_schema_version_too_new,
+    release_lcm_connection,
+    run_versioned_migrations,
+)
 
 
 def _synchronized(method):
@@ -66,23 +73,22 @@ class LifecycleStateStore:
         self._init_db()
 
     def _init_db(self) -> None:
-        self._conn = sqlite3.connect(
-            str(self.db_path),
-            timeout=30.0,
-            check_same_thread=False,
-            isolation_level=None,
-        )
-        refuse_schema_version_too_new(self._conn)
-        configure_connection(self._conn)
-        self._conn.row_factory = sqlite3.Row
-        run_versioned_migrations(self._conn)
-        self._conn.commit()
+        self._conn = acquire_lcm_connection(self.db_path)
+        self._lock = lcm_connection_lock(self._conn)
+        try:
+            refuse_schema_version_too_new(self._conn)
+            configure_connection(self._conn)
+            run_versioned_migrations(self._conn)
+            self._conn.commit()
+        except Exception:
+            release_lcm_connection(self._conn)
+            self._conn = None
+            raise
 
     def close(self) -> None:
         conn = getattr(self, "_conn", None)
         if conn is not None:
-            checkpoint_wal(conn)
-            conn.close()
+            release_lcm_connection(conn)
             self._conn = None
 
     def __del__(self) -> None:  # pragma: no cover - defensive resource cleanup

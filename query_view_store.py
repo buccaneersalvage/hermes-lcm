@@ -22,10 +22,12 @@ from typing import Any, Iterator, Literal, NamedTuple, Sequence
 import uuid
 
 from .db_bootstrap import (
-    checkpoint_wal,
+    acquire_lcm_connection,
     configure_connection,
+    lcm_connection_lock,
     mark_migration_step_complete,
     refuse_schema_version_too_new,
+    release_lcm_connection,
     run_versioned_migrations,
 )
 
@@ -536,14 +538,11 @@ class QueryViewStore:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(
-            str(self.db_path), timeout=5.0, check_same_thread=False
-        )
-        self._write_lock = threading.RLock()
+        self._conn = acquire_lcm_connection(self.db_path)
+        self._write_lock = lcm_connection_lock(self._conn)
         try:
             refuse_schema_version_too_new(self._conn)
             configure_connection(self._conn)
-            self._conn.row_factory = sqlite3.Row
             run_versioned_migrations(self._conn)
             _ensure_query_view_schema(self._conn)
             missing = _verify_query_view_schema(self._conn)
@@ -554,7 +553,7 @@ class QueryViewStore:
             mark_migration_step_complete(self._conn, QUERY_VIEW_MIGRATION_STEP)
             self._conn.commit()
         except Exception as exc:
-            self._conn.close()
+            release_lcm_connection(self._conn)
             self._conn = None
             if isinstance(exc, sqlite3.Error):
                 raise RuntimeError(f"query-view schema ensure failed: {exc}") from exc
@@ -1261,8 +1260,7 @@ class QueryViewStore:
         with self._write_lock:
             conn = getattr(self, "_conn", None)
             if conn is not None:
-                checkpoint_wal(conn)
-                conn.close()
+                release_lcm_connection(conn)
                 self._conn = None
 
     def __del__(self) -> None:  # pragma: no cover - defensive cleanup
