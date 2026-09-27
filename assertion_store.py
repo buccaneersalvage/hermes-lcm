@@ -232,16 +232,24 @@ class AssertionStore:
     def _open_connection(self) -> sqlite3.Connection:
         if self.read_only:
             conn = acquire_lcm_connection(self.db_path, read_only=True)
-            conn.execute("PRAGMA query_only=ON")
-            conn.execute("PRAGMA busy_timeout=30000")
+        else:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = acquire_lcm_connection(self.db_path)
+        # Assign before setup so __init__'s except can release if we re-raise.
+        self._conn = conn
+        try:
+            if self.read_only:
+                conn.execute("PRAGMA query_only=ON")
+                conn.execute("PRAGMA busy_timeout=30000")
+            else:
+                refuse_schema_version_too_new(conn)
+                configure_connection(conn)
             self._write_lock = lcm_connection_lock(conn)
             return conn
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = acquire_lcm_connection(self.db_path)
-        self._write_lock = lcm_connection_lock(conn)
-        refuse_schema_version_too_new(conn)
-        configure_connection(conn)
-        return conn
+        except Exception:
+            release_lcm_connection(conn)
+            self._conn = None  # type: ignore[assignment]
+            raise
 
     def _init_db(self) -> None:
         if self.read_only:

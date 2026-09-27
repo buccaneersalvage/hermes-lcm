@@ -14,10 +14,15 @@ from __future__ import annotations
 import sqlite3
 import threading
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from hermes_lcm.assertion_store import AssertionStore
 from hermes_lcm.db_bootstrap import (
+    SchemaVersionTooNewError,
+    _WRITER_HUB,
+    _writer_hub_key,
     acquire_lcm_connection,
     checkpoint_wal,
     configure_connection,
@@ -27,6 +32,7 @@ from hermes_lcm.db_bootstrap import (
 from hermes_lcm.store import MessageStore
 from hermes_lcm.dag import SummaryDAG
 from hermes_lcm.lifecycle_state import LifecycleStateStore
+from hermes_lcm.trajectory_store import CorpusIdentity, TrajectoryStore
 
 
 # --------------------------------------------------------------------------- #
@@ -375,3 +381,49 @@ class TestSharedWriterHub:
         wal = Path(str(db) + "-wal")
         wal_size = wal.stat().st_size if wal.exists() else 0
         assert wal_size < 4096, f"WAL still {wal_size} bytes after last close"
+
+    def test_failed_assertion_open_drops_hub_ref(self, tmp_path: Path):
+        db = tmp_path / "assert-fail-open.db"
+        MessageStore(db).close()
+        with patch(
+            "hermes_lcm.assertion_store.refuse_schema_version_too_new",
+            side_effect=SchemaVersionTooNewError("too new"),
+        ):
+            with pytest.raises(SchemaVersionTooNewError):
+                AssertionStore(db)
+        assert _writer_hub_key(db) not in _WRITER_HUB
+        store = MessageStore(db)
+        try:
+            store.append("sess", {"role": "user", "content": "hello"})
+        finally:
+            store.close()
+        wal = Path(str(db) + "-wal")
+        wal_size = wal.stat().st_size if wal.exists() else 0
+        assert wal_size < 4096, f"WAL still {wal_size} bytes after failed open + close"
+
+    def test_failed_trajectory_open_drops_hub_ref(self, tmp_path: Path):
+        db = tmp_path / "traj-fail-open.db"
+        MessageStore(db).close()
+        identity = CorpusIdentity(
+            dataset_name="example/trajectory-benchmark",
+            dataset_revision="dataset-rev-1",
+            harness_commit="harness-commit-1",
+            tier="small",
+            domain="enterprise",
+            ingest_config_digest="ingest-v1",
+        )
+        with patch(
+            "hermes_lcm.trajectory_store.refuse_schema_version_too_new",
+            side_effect=SchemaVersionTooNewError("too new"),
+        ):
+            with pytest.raises(SchemaVersionTooNewError):
+                TrajectoryStore(db, identity, asset_root=tmp_path / "assets")
+        assert _writer_hub_key(db) not in _WRITER_HUB
+        store = MessageStore(db)
+        try:
+            store.append("sess", {"role": "user", "content": "hello"})
+        finally:
+            store.close()
+        wal = Path(str(db) + "-wal")
+        wal_size = wal.stat().st_size if wal.exists() else 0
+        assert wal_size < 4096, f"WAL still {wal_size} bytes after failed open + close"
