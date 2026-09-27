@@ -26,6 +26,7 @@ from typing import Any, Iterator, Optional, Sequence
 
 from .config import LCMConfig
 from .db_bootstrap import (
+    checkpoint_wal,
     configure_connection,
     ensure_chunk_tables,
     ensure_embedding_tables,
@@ -2944,10 +2945,7 @@ class VectorStore:
     def close(self) -> None:
         conn = getattr(self, "_conn", None)
         if conn is not None:
-            try:
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            except sqlite3.Error:
-                pass
+            checkpoint_wal(conn)
             conn.close()
             self._conn = None
         with self._cache_lock:

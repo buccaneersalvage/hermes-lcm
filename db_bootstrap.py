@@ -124,15 +124,34 @@ def configure_connection(conn: sqlite3.Connection) -> None:
                                              or cap growth while another
                                              connection holds an old WAL
                                              end mark.
-    - mmap_size=268435456 (256 MiB)        : memory-map reads so concurrent
-                                              readers cache WAL pages in RAM.
+    - mmap_size=0                          : disable mmap. Concurrent mmap
+                                              writers plus a torn checkpoint
+                                              have produced btree page_count
+                                              mismatches on the live file.
     """
     conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     _execute_wal_conversion_with_lock_retry(conn)
     conn.execute("PRAGMA synchronous=FULL")
     conn.execute("PRAGMA wal_autocheckpoint=500")
     conn.execute("PRAGMA journal_size_limit=67108864")
-    conn.execute("PRAGMA mmap_size=268435456")
+    conn.execute("PRAGMA mmap_size=0")
+
+
+def checkpoint_wal(conn: sqlite3.Connection) -> None:
+    """Flush committed WAL frames into the main file on graceful close.
+
+    TRUNCATE copies frames and resets the WAL. PASSIVE is the fallback when
+    another connection still holds a read lock. Unexpected process death still
+    depends on SQLite WAL recovery. Callers must not VACUUM a live database
+    that other processes still have open.
+    """
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error:
+        try:
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except sqlite3.Error:
+            pass
 
 
 def _execute_wal_conversion_with_lock_retry(

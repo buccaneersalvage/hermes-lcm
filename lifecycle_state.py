@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from .db_bootstrap import configure_connection, refuse_schema_version_too_new, run_versioned_migrations
+from .db_bootstrap import checkpoint_wal, configure_connection, refuse_schema_version_too_new, run_versioned_migrations
 
 
 def _synchronized(method):
@@ -81,10 +81,7 @@ class LifecycleStateStore:
     def close(self) -> None:
         conn = getattr(self, "_conn", None)
         if conn is not None:
-            try:
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            except sqlite3.Error:
-                pass
+            checkpoint_wal(conn)
             conn.close()
             self._conn = None
 

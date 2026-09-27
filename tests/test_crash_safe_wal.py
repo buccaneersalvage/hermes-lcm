@@ -1,12 +1,12 @@
 """Tests for WAL durability configuration and graceful-close hygiene.
 
 These tests verify the PRAGMAs applied by ``configure_connection()`` and
-the best-effort passive WAL checkpoint performed by ``close()`` on all three
+the TRUNCATE-then-PASSIVE WAL checkpoint performed by ``close()`` on the
 SQLite helpers.
 
-This covers the PR #237 hardening path without overclaiming it: graceful close
-can checkpoint committed WAL frames best-effort, while unexpected process death
-still depends on SQLite WAL recovery.
+Graceful close checkpoints committed WAL frames best-effort. Unexpected
+process death still depends on SQLite WAL recovery. mmap stays off so
+concurrent writers cannot tear page_count against btree pointers.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from hermes_lcm.db_bootstrap import (
+    checkpoint_wal,
     configure_connection,
     ensure_message_origin_columns,
 )
@@ -82,7 +83,34 @@ class TestConfigureConnectionPragmas:
         configure_connection(conn)
         val = conn.execute("PRAGMA mmap_size").fetchone()[0]
         conn.close()
-        assert val == 268_435_456, f"expected mmap_size=268435456, got {val}"
+        assert val == 0, f"expected mmap_size=0, got {val}"
+
+
+class TestCheckpointWal:
+    def test_truncate_then_passive_on_lock(self):
+        seen: list[str] = []
+
+        class _Conn:
+            def execute(self, sql: str):
+                seen.append(sql)
+                if "TRUNCATE" in sql:
+                    raise sqlite3.OperationalError("database is locked")
+
+        checkpoint_wal(_Conn())  # type: ignore[arg-type]
+        assert seen == [
+            "PRAGMA wal_checkpoint(TRUNCATE)",
+            "PRAGMA wal_checkpoint(PASSIVE)",
+        ]
+
+    def test_truncate_success_skips_passive(self):
+        seen: list[str] = []
+
+        class _Conn:
+            def execute(self, sql: str):
+                seen.append(sql)
+
+        checkpoint_wal(_Conn())  # type: ignore[arg-type]
+        assert seen == ["PRAGMA wal_checkpoint(TRUNCATE)"]
 
 
 # --------------------------------------------------------------------------- #
@@ -91,8 +119,7 @@ class TestConfigureConnectionPragmas:
 
 
 class TestGracefulClose:
-    """Verify that close() performs a best-effort passive WAL checkpoint
-    without raising."""
+    """Verify that close() performs a best-effort WAL checkpoint without raising."""
 
     def _write_and_get_wal_size(self, db_path: Path) -> int:
         """Return WAL file size in bytes (0 if no WAL)."""

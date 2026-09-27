@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from .db_bootstrap import (
     ExternalContentFtsSpec,
     add_column_if_missing,
+    checkpoint_wal,
     configure_connection,
     ensure_external_content_fts,
     refuse_schema_version_too_new,
@@ -877,10 +878,7 @@ class SummaryDAG:
     def close(self) -> None:
         conn = getattr(self, "_conn", None)
         if conn:
-            try:
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            except sqlite3.Error:
-                pass
+            checkpoint_wal(conn)
             conn.close()
             self._conn = None
 

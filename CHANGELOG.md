@@ -4,7 +4,12 @@ This repo also publishes GitHub Releases. This file is the repo-root release sur
 
 ## Unreleased
 
-No additional changes yet.
+### Changed
+
+- SQLite connections set `mmap_size=0` and graceful `close()` checkpoints with
+  `wal_checkpoint(TRUNCATE)`, falling back to `PASSIVE` when another reader
+  holds the WAL. External tools must snapshot the live file read-only and
+  vacuum the snapshot; vacuuming a hot `lcm.db` tears btree page_count.
 
 ## v1.0.0-rc.1 - 2026-09-03
 

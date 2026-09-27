@@ -22,6 +22,7 @@ from typing import Any, Iterator, Literal, NamedTuple, Sequence
 import uuid
 
 from .db_bootstrap import (
+    checkpoint_wal,
     configure_connection,
     mark_migration_step_complete,
     refuse_schema_version_too_new,
@@ -1260,10 +1261,7 @@ class QueryViewStore:
         with self._write_lock:
             conn = getattr(self, "_conn", None)
             if conn is not None:
-                try:
-                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                except sqlite3.Error:
-                    pass
+                checkpoint_wal(conn)
                 conn.close()
                 self._conn = None
 

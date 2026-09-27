@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional
 from .db_bootstrap import (
     ExternalContentFtsSpec,
     add_column_if_missing,
+    checkpoint_wal,
     configure_connection,
     ensure_external_content_fts,
     refuse_schema_version_too_new,
@@ -1743,12 +1744,8 @@ class MessageStore:
         conn = getattr(self, "_conn", None)
         if conn:
             # Graceful shutdown hygiene: checkpoint committed WAL frames before
-            # releasing the connection.  This does not run on crash/kill, and
-            # PASSIVE can leave frames behind when another reader is active.
-            try:
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            except sqlite3.Error:
-                pass  # best-effort only; don't let this mask the real close()
+            # releasing the connection.  This does not run on crash/kill.
+            checkpoint_wal(conn)
             conn.close()
             self._conn = None
 

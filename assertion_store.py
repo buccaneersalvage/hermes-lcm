@@ -22,6 +22,7 @@ from urllib.parse import quote
 
 from .db_bootstrap import (
     ASSERTION_MIGRATION_STEP,
+    checkpoint_wal,
     configure_connection,
     ensure_assertion_tables,
     mark_migration_step_complete,
@@ -293,6 +294,7 @@ class AssertionStore:
             try:
                 if not self.read_only:
                     conn.commit()
+                checkpoint_wal(conn)
             finally:
                 conn.close()
                 self._conn = None  # type: ignore[assignment]
